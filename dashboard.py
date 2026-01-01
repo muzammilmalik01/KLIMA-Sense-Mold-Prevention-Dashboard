@@ -46,7 +46,7 @@ def render_custom_table(df):
 
 # Page Config
 st.set_page_config(
-    page_title="Mold Prevention Dashboard",
+    page_title="KLIMA Sense. | Sense the Unseen",
     page_icon="🌿",
     layout="wide",
     initial_sidebar_state="collapsed"

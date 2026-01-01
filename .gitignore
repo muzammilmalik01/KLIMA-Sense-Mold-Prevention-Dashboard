@@ -1,1 +1,3 @@
 *.db
+*.dm-shm
+*.dm-wal
