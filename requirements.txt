@@ -1,4 +1,11 @@
-pyserial
-streamlit
-pandas
-numpy
+# KLIMA Sense - Raspberry Pi Requirements
+# ========================================
+# Install with: pip install -r requirements.txt
+
+# Dashboard
+streamlit>=1.28.0
+pandas>=2.0.0
+plotly>=5.18.0
+
+# Data Logger
+pyserial>=3.5
