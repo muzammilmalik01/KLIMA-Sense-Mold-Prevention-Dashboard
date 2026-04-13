@@ -46,7 +46,7 @@ def render_custom_table(df):
 
 # Page Config
 st.set_page_config(
-    page_title="KLIMA Sense. | Sense the Unseen",
+    page_title="Mold Prevention Dashboard",
     page_icon="🌿",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -173,7 +173,8 @@ def get_mold_case(mold_index: float, growth_status: int, temp: float, humidity: 
         return 5
     
     # CASE 6: Declining mold (positive feedback)
-    if prev_mold_index is not None and growth_status == 0 and mold_index > 0 and mold_index < prev_mold_index:
+    # Require a meaningful decline (at least 0.05) to avoid oscillation from sensor noise
+    if prev_mold_index is not None and growth_status == 0 and mold_index > 0 and (prev_mold_index - mold_index) >= 0.05:
         return 6
     
     # CASE 4: Severe growth
@@ -207,6 +208,11 @@ def inject_custom_css():
     <style>
         /* Import Outfit as Google Sans fallback */
         @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@100;300;400;500;700;900&display=swap');
+        
+        /* PREVENT STREAMLIT FADE - Keep elements visible during rerun */
+        div[data-stale="true"] {{
+            opacity: 1 !important;
+        }}
         
         /* Global Text Reset */
         html, body, [class*="css"], p, h1, h2, h3, h4, span, div {{
@@ -1367,7 +1373,7 @@ def render_diagnostic_card_v2(node_name, node_ip, status, last_seen, uptime_data
 def render_glance_tab(db, update_room, current_readings_df, historical_df):
     # Pills Here (Above Content)
     # Note: default=... is ignored if key exists in state, which we handled above
-    st.pills("Select Room:", db.rooms, selection_mode="single", key="pills_t1", default=st.session_state.current_room, on_change=update_room, args=("pills_t1",))
+    st.pills("Select Room:", db.rooms, selection_mode="single", key="pills_t1", on_change=update_room, args=("pills_t1",))
         
     selected_room = st.session_state.current_room # Use state
 
@@ -1583,20 +1589,27 @@ def main():
         def update_room(source_key):
             """Syncs the selected room across tabs."""
             selected = st.session_state[source_key]
+            
+            # PREVENT UNSELECTION: If None (double-tap), restore previous value
             if selected is None:
-                return  # Ignore empty selections
+                st.session_state[source_key] = st.session_state.current_room
+                return
+            
+            # Only update if actually changed
+            if selected == st.session_state.current_room:
+                return
+            
+            # Update the main room state
             st.session_state.current_room = selected
             
-            # Sync the OTHER key so it reflects the change immediately
-            if source_key == "pills_t1":
-                st.session_state["pills_t2"] = selected
-            elif source_key == "pills_t2":
-                st.session_state["pills_t1"] = selected
+            # Sync BOTH keys to the selected value (prevents desync)
+            st.session_state["pills_t1"] = selected
+            st.session_state["pills_t2"] = selected
     
         # Ensure widget keys exist in state to prevent KeyErrors on first run sync attempts
         if "pills_t1" not in st.session_state: st.session_state["pills_t1"] = st.session_state.current_room
         if "pills_t2" not in st.session_state: st.session_state["pills_t2"] = st.session_state.current_room
-    
+
         # --- Data Fetching ---
         current_readings_df = db.generate_current_readings()
         historical_df = db.generate_historical_data()
@@ -1607,7 +1620,7 @@ def main():
         active_alerts = db.get_active_alerts() 
         node_states = db.get_node_states()
         
-        offline_nodes = [ip for ip, st in node_states.items() if st == 'offline' and ip != 'SERVER']
+        offline_nodes = [ip for ip, s in node_states.items() if s == 'offline' and ip != 'SERVER']
         failed_sensors = current_health_df[current_health_df['sensor_a_status'] >= 2] if not current_health_df.empty else pd.DataFrame()
 
         is_gateway_online = node_states.get('SERVER', 'online') == 'online'
@@ -1721,18 +1734,34 @@ def main():
         """, unsafe_allow_html=True)
         
         # --- GLOBAL MOLD RISK BANNER (Visible on all tabs) ---
-        # Calculate worst case across all rooms
+        # Calculate worst case across all rooms AND track mold case changes for toasts
         worst_case = 0
         worst_room = None
         worst_rec = RECOMMENDATION_CASES[0]
         
         for _, row in current_readings_df.iterrows():
+            room_name = row['room_name']
             r_temp = row['temperature']
             r_hum = row['humidity']
             r_mold = row['mold_index']
             r_growth = int(row.get('growth_status', 0)) if 'growth_status' in row.index else 0
             r_rh_crit = row.get('rh_crit', 80.0) if 'rh_crit' in row.index else 80.0
             r_case = get_mold_case(r_mold, r_growth, r_temp, r_hum, r_rh_crit, None)
+            
+            # Track case changes GLOBALLY for each room (not just selected)
+            case_key = f"mold_case_{room_name}"
+            prev_case = st.session_state.get(case_key, 0)
+            if prev_case != r_case:
+                st.session_state[case_key] = r_case
+                rec_info = RECOMMENDATION_CASES.get(r_case, RECOMMENDATION_CASES[0])
+                # Show toast on case change (higher severity = warning)
+                if r_case > prev_case and r_case > 0:
+                    st.toast(f"⚠️ {room_name}: {rec_info['headline']}", icon="🚨")
+                elif r_case < prev_case and r_case == 0:
+                    st.toast(f"✅ {room_name}: Conditions normalized!", icon="✅")
+                elif r_case == 6:
+                    st.toast(f"📉 {room_name}: Mold risk is declining!", icon="✅")
+            
             if r_case > worst_case:
                 worst_case = r_case
                 worst_room = row['room_name']
@@ -1774,7 +1803,7 @@ def main():
         # ---------------------------
         with tab2:
             # Pills Here (Synced)
-            st.pills("Select Room:", db.rooms, selection_mode="single", key="pills_t2", default=st.session_state.current_room, on_change=update_room, args=("pills_t2",))
+            st.pills("Select Room:", db.rooms, selection_mode="single", key="pills_t2", on_change=update_room, args=("pills_t2",))
                 
             selected_room_t2 = st.session_state.current_room
             room_data_t2 = current_readings_df[current_readings_df["room_name"] == selected_room_t2].iloc[0]
@@ -1852,18 +1881,8 @@ def main():
             rec_color = rec_data['color']
             rec_banner_color = rec_data['banner_color']
             
-            # Track case changes for toast notifications
-            case_key = f"mold_case_{selected_room_t2}"
-            prev_case = st.session_state.get(case_key, 0)
-            if prev_case != current_case:
-                st.session_state[case_key] = current_case
-                # Show toast on case change
-                if current_case > prev_case:
-                    st.toast(f"⚠️ {selected_room_t2}: {rec_data['headline']}", icon="🚨")
-                elif current_case < prev_case and current_case == 0:
-                    st.toast(f"✅ {selected_room_t2}: Conditions normalized!", icon="✅")
-                elif current_case == 6:
-                    st.toast(f"📉 {selected_room_t2}: Mold risk is declining!", icon="✅")
+            # NOTE: Toast notifications for mold case changes are now handled globally
+            # above the tabs section to ensure alerts fire regardless of which tab is active
     
             # Helper to render card with MD3 / 16px radius
             def card_html(title, main_text, sub_text, accent_color, sub_color=COLORS['text_main']):
@@ -2155,8 +2174,9 @@ def main():
                  err_info = HEALTH_CODES.get(row['sensor_a_status'], HEALTH_CODES[6])
                  st.toast(f"⚠️ {row['room_name']}: {err_info['msg']}", icon="🚨")
     
-        # Auto Refresh
-        time.sleep(3)
+        # Auto Refresh every 2 seconds
+        # Shorter interval = faster UI response to clicks (max 2s wait)
+        time.sleep(1)
         st.rerun()
 
     except Exception as e:
